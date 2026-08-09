@@ -320,6 +320,20 @@ struct llama_layer {
     struct ggml_tensor * ffn_down_exps_s   = nullptr;
     struct ggml_tensor * ffn_up_exps_s     = nullptr;
 
+    // Escha trellis codec companions (present only in trellis-quantized GGUFs)
+    // code:  I16 [16*K, tj, ti, E] packed tiles (ti = in/16, tj = out/16)
+    // rin:   F16 [in, E]  per-input-channel  scale
+    // rout:  F16 [out, E] per-output-channel scale
+    struct ggml_tensor * ffn_gate_exps_escha_code  = nullptr;
+    struct ggml_tensor * ffn_gate_exps_escha_rin   = nullptr;
+    struct ggml_tensor * ffn_gate_exps_escha_rout  = nullptr;
+    struct ggml_tensor * ffn_up_exps_escha_code    = nullptr;
+    struct ggml_tensor * ffn_up_exps_escha_rin     = nullptr;
+    struct ggml_tensor * ffn_up_exps_escha_rout    = nullptr;
+    struct ggml_tensor * ffn_down_exps_escha_code  = nullptr;
+    struct ggml_tensor * ffn_down_exps_escha_rin   = nullptr;
+    struct ggml_tensor * ffn_down_exps_escha_rout  = nullptr;
+
     // ff MoE latent proj
     struct ggml_tensor * ffn_latent_down = nullptr;
     struct ggml_tensor * ffn_latent_up   = nullptr;

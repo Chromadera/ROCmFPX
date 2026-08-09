@@ -16,6 +16,7 @@
 #include "common.h"
 #include "../../rocmfp4/rocmfp4.h"
 #include "../../rocmfpx/rocmfpx.h"
+#include "ggml-trellis.h"
 
 #if defined(_MSC_VER) || defined(__MINGW32__)
 #include <malloc.h> // using malloc.h with MSC/MINGW
@@ -1903,6 +1904,111 @@ static void ggml_compute_forward_mul_mat_id(
     }
 }
 
+// ggml_compute_forward_trellis_mm_id
+//
+// Escha trellis expert matmul. Per (selected expert slot i1, token i2):
+//   e = ids[i1, i2]
+//   xh    = had128(b[:, i2] * rout[:, e])          // scale + Hadamard on activations
+//   y_pre = D_e @ xh                                // trellis matvec (D_e decoded tiles)
+//   y     = had128(y_pre) * rin[:, e]               // Hadamard + scale on output
+// where D_e = ggml_trellis_decode_tiles(code[e]) is [in, out] (no Hadamard/scales).
+//
+// Single-threaded for now (correctness milestone; HIP kernel lands separately).
+// The decode of an expert is O(in*out) codebook lookups, so experts appearing
+// in multiple (i1, i2) pairs are decoded once per unique expert and reused.
+static void ggml_compute_forward_trellis_mm_id(
+        const struct ggml_compute_params * params,
+              struct ggml_tensor * dst) {
+    const struct ggml_tensor * code = dst->src[0];
+    const struct ggml_tensor * rin  = dst->src[1];
+    const struct ggml_tensor * rout = dst->src[2];
+    const struct ggml_tensor * b    = dst->src[3];
+    const struct ggml_tensor * ids  = dst->src[4];
+
+    if (params->ith != 0) {
+        return;
+    }
+
+    const int64_t K    = code->ne[0] / 16;
+    const int64_t ti   = code->ne[2];          // in / 16
+    const int64_t tj   = code->ne[1];          // out / 16
+    const int64_t in   = ti * 16;
+    const int64_t out  = tj * 16;
+    const int64_t E    = code->ne[3];
+
+    const int64_t n_expert_used = ids->ne[0];
+    const int64_t n_tokens      = ids->ne[1];
+
+    const int16_t * code_data = (const int16_t *) code->data;
+    const ggml_fp16_t * rin_data  = (const ggml_fp16_t *) rin->data;
+    const ggml_fp16_t * rout_data = (const ggml_fp16_t *) rout->data;
+    const float * b_data  = (const float *) b->data;
+    const int32_t * ids_data = (const int32_t *) ids->data;
+    float * dst_data = (float *) dst->data;
+
+    // scratch: decoded tiles for the current expert [in, out]
+    float * D = (float *) malloc((size_t) (in * out) * sizeof(float));
+    float * xh = (float *) malloc((size_t) out * sizeof(float));
+    float * y_pre = (float *) malloc((size_t) in * sizeof(float));
+    if (!D || !xh || !y_pre) {
+        free(D); free(xh); free(y_pre);
+        return;
+    }
+
+    // iterate unique experts (appearing in ids), decode once, apply to all pairs
+    for (int64_t e = 0; e < E; ++e) {
+        bool used = false;
+        for (int64_t i2 = 0; i2 < n_tokens && !used; ++i2) {
+            for (int64_t i1 = 0; i1 < n_expert_used; ++i1) {
+                if (ids_data[i1 + i2 * n_expert_used] == e) {
+                    used = true;
+                    break;
+                }
+            }
+        }
+        if (!used) {
+            continue;
+        }
+
+        ggml_trellis_decode_tiles(code_data + e * (16 * K * ti * tj), in, out, (int) K, D);
+
+
+        for (int64_t i2 = 0; i2 < n_tokens; ++i2) {
+            for (int64_t i1 = 0; i1 < n_expert_used; ++i1) {
+                const int64_t idx = i1 + i2 * n_expert_used;
+                if (ids_data[idx] != e) {
+                    continue;
+                }
+
+                // xh = had128(b[:, i2] * rout[:, e])
+                for (int64_t i = 0; i < out; ++i) {
+                    xh[i] = b_data[i + i2 * out] * ggml_fp16_to_fp32(rout_data[i + e * out]);
+                }
+                ggml_trellis_had128(xh, out);
+
+                // y_pre = D @ xh
+                for (int64_t j = 0; j < in; ++j) {
+                    float acc = 0.0f;
+                    const float * row = D + j * out;
+                    for (int64_t i = 0; i < out; ++i) {
+                        acc += row[i] * xh[i];
+                    }
+                    y_pre[j] = acc;
+                }
+
+                // y = had128(y_pre) * rin[:, e]
+                ggml_trellis_had128(y_pre, in);
+                float * dst_col = dst_data + i1 * in + i2 * (in * n_expert_used);
+                for (int64_t j = 0; j < in; ++j) {
+                    dst_col[j] = y_pre[j] * ggml_fp16_to_fp32(rin_data[j + e * in]);
+                }
+            }
+        }
+    }
+
+    free(D); free(xh); free(y_pre);
+}
+
 /////////////////////////////////
 
 static void ggml_compute_forward(struct ggml_compute_params * params, struct ggml_tensor * tensor) {
@@ -2037,6 +2143,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
         case GGML_OP_MUL_MAT_ID:
             {
                 ggml_compute_forward_mul_mat_id(params, tensor);
+            } break;
+        case GGML_OP_TRELLIS_MM_ID:
+            {
+                ggml_compute_forward_trellis_mm_id(params, tensor);
             } break;
         case GGML_OP_OUT_PROD:
             {
@@ -2535,6 +2645,11 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_OUT_PROD:
             {
                 n_tasks = n_threads;
+            } break;
+        case GGML_OP_TRELLIS_MM_ID:
+            {
+                // single-threaded CPU decode for now (HIP kernel is the perf path)
+                n_tasks = 1;
             } break;
         case GGML_OP_GET_ROWS:
         case GGML_OP_SET_ROWS:

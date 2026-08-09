@@ -1072,6 +1072,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
 
     "MUL_MAT",
     "MUL_MAT_ID",
+    "TRELLIS_MM_ID",
     "OUT_PROD",
 
     "SCALE",
@@ -1152,7 +1153,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
+static_assert(GGML_OP_COUNT == 103, "GGML_OP_COUNT != 103");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1188,6 +1189,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
 
     "X*Y",
     "X[i]*Y",
+    "X[i]*Y(trellis)",
     "X*Y",
 
     "x*v",
@@ -1268,7 +1270,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
+static_assert(GGML_OP_COUNT == 103, "GGML_OP_COUNT != 103");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -3420,6 +3422,58 @@ struct ggml_tensor * ggml_mul_mat_id(
     result->src[0] = as;
     result->src[1] = b;
     result->src[2] = ids;
+
+    return result;
+}
+
+// ggml_trellis_mm_id
+//
+// Indirect expert matmul with Escha trellis decoding, mirroring ggml_mul_mat_id:
+// the packed trellis codes are decoded on the fly per selected expert, with the
+// blockwise-128 Hadamard and channel scales applied on the activation side.
+//
+//   code:  [16*K, tj, ti, E] int16   ti = in/16, tj = out/16, K = bits per code
+//   rin:   [in, E]  f16  per-input-channel  scale
+//   rout:  [out, E] f16  per-output-channel scale
+//   b:     [out, n_tokens] f32 activations (contract over out)
+//   ids:   [n_expert_used, n_tokens] i32 selected experts
+//   result: [in, n_expert_used, n_tokens] f32
+//
+// Per (expert e, token t):  y = had128( D_e @ had128(b[:,t] * rout[e]) ) * rin[e]
+// where D_e is the trellis-decoded tile matrix [in, out] for expert e (no
+// Hadamard, no scales - those land on the activations per the Escha inference
+// factorization).
+struct ggml_tensor * ggml_trellis_mm_id(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * code,
+        struct ggml_tensor  * rin,
+        struct ggml_tensor  * rout,
+        struct ggml_tensor  * b,
+        struct ggml_tensor  * ids) {
+    GGML_ASSERT(!ggml_is_transposed(code));
+    GGML_ASSERT(ids->type == GGML_TYPE_I32);
+    GGML_ASSERT(code->type == GGML_TYPE_I16);
+    GGML_ASSERT(rin->type  == GGML_TYPE_F16);
+    GGML_ASSERT(rout->type == GGML_TYPE_F16);
+    GGML_ASSERT(b->type    == GGML_TYPE_F32);
+
+    GGML_ASSERT(code->ne[3] == rin->ne[1]);   // E matches
+    GGML_ASSERT(code->ne[3] == rout->ne[1]);  // E matches
+    GGML_ASSERT(code->ne[2] * 16 == rin->ne[0]);  // ti*16 == in
+    GGML_ASSERT(code->ne[1] * 16 == rout->ne[0]); // tj*16 == out
+    GGML_ASSERT(code->ne[1] * 16 == b->ne[0]);    // tj*16 == out == contract dim
+    GGML_ASSERT(ids->ne[1] == b->ne[2]);          // expert list per b row
+    GGML_ASSERT(ids->ne[0] % b->ne[1] == 0);      // can broadcast
+
+    const int64_t ne[4] = { rin->ne[0], ids->ne[0], b->ne[2], 1 };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    result->op     = GGML_OP_TRELLIS_MM_ID;
+    result->src[0] = code;
+    result->src[1] = rin;
+    result->src[2] = rout;
+    result->src[3] = b;
+    result->src[4] = ids;
 
     return result;
 }

@@ -21,6 +21,20 @@ struct llama_layer;
 
 struct llama_memory_context_i;
 
+// Escha trellis codec tensors for an MoE layer's routed experts. Each pointer
+// mirrors the corresponding llama_layer field; all-null means "no trellis".
+struct llm_moe_trellis_tensors {
+    struct ggml_tensor * up_code   = nullptr; // I16 [16*K, tj, ti, E]
+    struct ggml_tensor * up_rin    = nullptr; // F16 [in, E]
+    struct ggml_tensor * up_rout   = nullptr; // F16 [out, E]
+    struct ggml_tensor * gate_code = nullptr;
+    struct ggml_tensor * gate_rin  = nullptr;
+    struct ggml_tensor * gate_rout = nullptr;
+    struct ggml_tensor * down_code = nullptr;
+    struct ggml_tensor * down_rin  = nullptr;
+    struct ggml_tensor * down_rout = nullptr;
+};
+
 class llama_kv_cache_context;
 class llama_kv_cache_dsa_context;
 class llama_kv_cache_iswa_context;
@@ -974,7 +988,8 @@ struct llm_graph_context {
              ggml_tensor * up_exps_s = nullptr,
              ggml_tensor * gate_exps_s = nullptr,
              ggml_tensor * down_exps_s = nullptr,
-             ggml_tensor * selected_experts_in = nullptr) const;
+             ggml_tensor * selected_experts_in = nullptr,
+             const llm_moe_trellis_tensors * trellis = nullptr) const;
 
     ggml_tensor * build_moe_ffn(
              ggml_tensor * cur,
@@ -1000,7 +1015,8 @@ struct llm_graph_context {
              ggml_tensor * up_exps_s = nullptr,
              ggml_tensor * gate_exps_s = nullptr,
              ggml_tensor * down_exps_s = nullptr,
-             ggml_tensor * selected_experts_in = nullptr) const;
+             ggml_tensor * selected_experts_in = nullptr,
+             const llm_moe_trellis_tensors * trellis = nullptr) const;
 
     //
     // inputs

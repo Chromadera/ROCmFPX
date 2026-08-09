@@ -97,10 +97,33 @@ void llama_model_qwen35moe::load_arch_tensors(llama_model_loader & ml) {
             layer.ssm_out        = create_tensor(tn(LLM_TENSOR_SSM_OUT,        "weight", il), { value_dim, n_embd }, flags);
         }
 
-        // Routed experts
+        // Routed experts. In trellis GGUFs the routed-expert .weight tensors are
+        // replaced by the escha triplet (code/rin/rout), so they are optional
+        // when the triplet is present.
+        const bool has_trellis =
+            ml.get_tensor_meta(tn(LLM_TENSOR_FFN_GATE_EXPS, "escha_code", il).str().c_str()) != nullptr;
+        const int exp_flags = has_trellis ? (flags | TENSOR_NOT_REQUIRED) : flags;
         layer.ffn_gate_inp  = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP,  "weight", il), { n_embd, n_expert }, flags);
-        layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", il), { n_ff_exp, n_embd, n_expert }, flags);
-        create_tensor_gate_up_exps(layer, il, n_embd, n_ff_exp, n_expert, flags);
+        layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", il), { n_ff_exp, n_embd, n_expert }, exp_flags);
+        create_tensor_gate_up_exps(layer, il, n_embd, n_ff_exp, n_expert, exp_flags);
+
+        // Escha trellis codec companions (optional; present only in trellis GGUFs).
+        // code: [16*K, tj, ti, E] I16 ; rin: [in, E] F16 ; rout: [out, E] F16
+        {
+            const int64_t ti_up  = n_ff_exp / 16;  // gate/up: in = n_ff_exp (contract), out = n_embd
+            const int64_t tj_up  = n_embd   / 16;
+            const int64_t ti_dn  = n_embd   / 16;  // down: in = n_embd (contract), out = n_ff_exp
+            const int64_t tj_dn  = n_ff_exp / 16;
+            layer.ffn_up_exps_escha_code  = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "escha_code", il), { 16*2, tj_up, ti_up, n_expert }, TENSOR_NOT_REQUIRED);
+            layer.ffn_up_exps_escha_rin   = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "escha_rin",  il), { n_ff_exp, n_expert }, TENSOR_NOT_REQUIRED);
+            layer.ffn_up_exps_escha_rout  = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "escha_rout", il), { n_embd, n_expert }, TENSOR_NOT_REQUIRED);
+            layer.ffn_gate_exps_escha_code= create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "escha_code", il), { 16*2, tj_up, ti_up, n_expert }, TENSOR_NOT_REQUIRED);
+            layer.ffn_gate_exps_escha_rin = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "escha_rin",  il), { n_ff_exp, n_expert }, TENSOR_NOT_REQUIRED);
+            layer.ffn_gate_exps_escha_rout= create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "escha_rout", il), { n_embd, n_expert }, TENSOR_NOT_REQUIRED);
+            layer.ffn_down_exps_escha_code = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "escha_code", il), { 16*3, tj_dn, ti_dn, n_expert }, TENSOR_NOT_REQUIRED);
+            layer.ffn_down_exps_escha_rin  = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "escha_rin",  il), { n_embd, n_expert }, TENSOR_NOT_REQUIRED);
+            layer.ffn_down_exps_escha_rout = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "escha_rout", il), { n_ff_exp, n_expert }, TENSOR_NOT_REQUIRED);
+        }
 
         // Shared experts
         layer.ffn_gate_inp_shexp = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP_SHEXP, "weight", il), { n_embd }, flags);

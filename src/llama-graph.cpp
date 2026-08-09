@@ -1511,31 +1511,33 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          ggml_tensor * gate_up_exps,
          ggml_tensor * up_exps_s,
          ggml_tensor * gate_exps_s,
-         ggml_tensor * down_exps_s,
-         ggml_tensor * selected_experts_in) const {
-    return build_moe_ffn(
-        cur,
-        gate_inp,  /* gate_inp_b  */ nullptr,
-        up_exps,   /* up_exps_b   */ nullptr,
-        gate_exps, /* gate_exps_b */ nullptr,
-        down_exps, /* down_exps_b */ nullptr,
-        exp_probs_b,
-        n_expert,
-        n_expert_used,
-        type_op,
-        norm_w,
-        w_scale,
-        gating_op,
-        il,
-        probs_in,
-        gate_up_exps,
-        /* gate_up_exps_b */ nullptr,
-        up_exps_s,
-        gate_exps_s,
-        down_exps_s,
-        selected_experts_in
-    );
-}
+          ggml_tensor * down_exps_s,
+          ggml_tensor * selected_experts_in,
+          const llm_moe_trellis_tensors * trellis) const {
+     return build_moe_ffn(
+         cur,
+         gate_inp,  /* gate_inp_b  */ nullptr,
+         up_exps,   /* up_exps_b   */ nullptr,
+         gate_exps, /* gate_exps_b */ nullptr,
+         down_exps, /* down_exps_b */ nullptr,
+         exp_probs_b,
+         n_expert,
+         n_expert_used,
+         type_op,
+         norm_w,
+         w_scale,
+         gating_op,
+         il,
+         probs_in,
+         gate_up_exps,
+         /* gate_up_exps_b */ nullptr,
+         up_exps_s,
+         gate_exps_s,
+         down_exps_s,
+         selected_experts_in,
+         trellis
+     );
+ }
 
 ggml_tensor * llm_graph_context::build_moe_ffn(
          ggml_tensor * cur,
@@ -1561,11 +1563,17 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          ggml_tensor * up_exps_s,
          ggml_tensor * gate_exps_s,
          ggml_tensor * down_exps_s,
-         ggml_tensor * selected_experts_in) const {
+         ggml_tensor * selected_experts_in,
+         const llm_moe_trellis_tensors * trellis) const {
     const int64_t n_embd   = cur->ne[0];
     const int64_t n_tokens = cur->ne[1];
     const bool weight_before_ffn = arch == LLM_ARCH_LLAMA4; // for llama4, we apply the sigmoid-ed weights before the FFN
     const bool weight_before_down = arch == LLM_ARCH_DEEPSEEK4; // DeepSeek V4 applies routed weights after SwiGLU and before w2
+
+    // Escha trellis path: routed experts are packed codes decoded per expert.
+    const bool trellis_up   = trellis && trellis->up_code   && trellis->up_rin   && trellis->up_rout;
+    const bool trellis_gate = trellis && trellis->gate_code && trellis->gate_rin && trellis->gate_rout;
+    const bool trellis_down = trellis && trellis->down_code && trellis->down_rin && trellis->down_rout;
 
     ggml_tensor * logits = nullptr;
 
@@ -1703,9 +1711,13 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
     const int64_t n_expert_in = gate_up_exps ? gate_up_exps->ne[0] :
             up_exps ? up_exps->ne[0] :
-            gate_exps ? gate_exps->ne[0] : n_embd;
-    const int64_t n_ff_down = down_exps ? down_exps->ne[0] : 0;
-    const int64_t n_moe_out = down_exps ? down_exps->ne[1] : n_embd;
+            gate_exps ? gate_exps->ne[0] :
+            (trellis_up ? trellis->up_rout->ne[0] :
+             trellis_gate ? trellis->gate_rout->ne[0] : n_embd);
+    const int64_t n_ff_down = down_exps ? down_exps->ne[0] :
+            (trellis_down ? trellis->down_rout->ne[0] : 0);
+    const int64_t n_moe_out = down_exps ? down_exps->ne[1] :
+            (trellis_down ? trellis->down_rin->ne[0] : n_embd);
     ggml_tensor * cur_expert_in = cur;
     if (n_expert_in > 0 && n_expert_in < n_embd) {
         cur_expert_in = ggml_view_3d(ctx0, cur, n_expert_in, 1, n_tokens, cur->nb[1], cur->nb[2], 0);
@@ -1747,8 +1759,13 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(up, "ffn_moe_up", il);
     } else {
         // separate gate and up path
-        up = build_lora_mm_id(up_exps, cur_expert_in, selected_experts, up_exps_s); // [n_ff, n_expert_used, n_tokens]
-        cb(up, "ffn_moe_up", il);
+        if (trellis_up) {
+            up = ggml_trellis_mm_id(ctx0, trellis->up_code, trellis->up_rin, trellis->up_rout, cur_expert_in, selected_experts); // [in, n_expert_used, n_tokens]
+            cb(up, "ffn_moe_up", il);
+        } else {
+            up = build_lora_mm_id(up_exps, cur_expert_in, selected_experts, up_exps_s); // [n_ff, n_expert_used, n_tokens]
+            cb(up, "ffn_moe_up", il);
+        }
 
         if (up_exps_s) {
             cb(up, "ffn_moe_up_scaled", il);
@@ -1759,9 +1776,14 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             cb(up, "ffn_moe_up_biased", il);
         }
 
-        if (gate_exps) {
-            cur = build_lora_mm_id(gate_exps, cur_expert_in, selected_experts, gate_exps_s); // [n_ff, n_expert_used, n_tokens]
-            cb(cur, "ffn_moe_gate", il);
+        if (gate_exps || trellis_gate) {
+            if (trellis_gate) {
+                cur = ggml_trellis_mm_id(ctx0, trellis->gate_code, trellis->gate_rin, trellis->gate_rout, cur_expert_in, selected_experts); // [in, n_expert_used, n_tokens]
+                cb(cur, "ffn_moe_gate", il);
+            } else {
+                cur = build_lora_mm_id(gate_exps, cur_expert_in, selected_experts, gate_exps_s); // [n_ff, n_expert_used, n_tokens]
+                cb(cur, "ffn_moe_gate", il);
+            }
         } else {
             cur = up;
         }
@@ -1776,11 +1798,11 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         }
     }
 
-    const bool has_gate = gate_exps || gate_up_exps;
+    const bool has_gate = gate_exps || gate_up_exps || trellis_gate;
 
     switch (type_op) {
         case LLM_FFN_SILU:
-            if (gate_exps) {
+            if (gate_exps || trellis_gate) {
                 if (arch == LLM_ARCH_DEEPSEEK4 && il >= 0) {
                     const float limit = hparams.swiglu_clamp_exp[il];
                     constexpr float eps = 1e-6f;
@@ -1878,8 +1900,13 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(cur, "ffn_moe_down_in", il);
     }
 
-    experts = build_lora_mm_id(down_exps, cur, selected_experts, down_exps_s); // [n_embd, n_expert_used, n_tokens]
-    cb(experts, "ffn_moe_down", il);
+    if (trellis_down) {
+        experts = ggml_trellis_mm_id(ctx0, trellis->down_code, trellis->down_rin, trellis->down_rout, cur, selected_experts); // [in, n_expert_used, n_tokens]
+        cb(experts, "ffn_moe_down", il);
+    } else {
+        experts = build_lora_mm_id(down_exps, cur, selected_experts, down_exps_s); // [n_embd, n_expert_used, n_tokens]
+        cb(experts, "ffn_moe_down", il);
+    }
 
     if (down_exps_s) {
         cb(experts, "ffn_moe_down_scaled", il);

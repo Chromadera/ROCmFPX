@@ -101,42 +101,41 @@ void ggml_trellis_decode_tiles(
     }
 }
 
-// In-place blockwise-128 orthonormal Sylvester Hadamard along one axis.
-static void had_axis(float * x, int64_t in, int64_t out, int axis) {
+// In-place blockwise-128 orthonormal Sylvester Hadamard over n contiguous f32.
+void ggml_trellis_had128(float * x, int64_t n) {
     const int64_t B = TRELLIS_HAD_BLOCK;
     const float inv = 1.0f / sqrtf((float) B);
 
+    for (int64_t blk = 0; blk < n / B; ++blk) {
+        float * v = x + blk * B;
+        for (int h = 1; h < B; h <<= 1) {
+            for (int64_t i = 0; i < B; i += 2 * h) {
+                for (int64_t j = i; j < i + h; ++j) {
+                    const float a = v[j], b = v[j + h];
+                    v[j] = a + b;
+                    v[j + h] = a - b;
+                }
+            }
+        }
+        for (int64_t i = 0; i < B; ++i) v[i] *= inv;
+    }
+}
+
+// In-place blockwise-128 orthonormal Sylvester Hadamard along one axis.
+static void had_axis(float * x, int64_t in, int64_t out, int axis) {
+    const int64_t B = TRELLIS_HAD_BLOCK;
+
     if (axis == 1) { // along out: each row independently
         for (int64_t r = 0; r < in; ++r) {
-            for (int64_t blk = 0; blk < out / B; ++blk) {
-                float * v = x + r * out + blk * B;
-                for (int h = 1; h < B; h <<= 1) {
-                    for (int i = 0; i < B; i += 2 * h) {
-                        for (int j = i; j < i + h; ++j) {
-                            const float a = v[j], b = v[j + h];
-                            v[j] = a + b;
-                            v[j + h] = a - b;
-                        }
-                    }
-                }
-                for (int i = 0; i < B; ++i) v[i] *= inv;
-            }
+            ggml_trellis_had128(x + r * out, out);
         }
     } else { // axis == 0: along in (column blocks)
         for (int64_t blk = 0; blk < in / B; ++blk) {
             for (int64_t c = 0; c < out; ++c) {
                 float v[TRELLIS_HAD_BLOCK];
                 for (int i = 0; i < B; ++i) v[i] = x[(blk * B + i) * out + c];
-                for (int h = 1; h < B; h <<= 1) {
-                    for (int i = 0; i < B; i += 2 * h) {
-                        for (int j = i; j < i + h; ++j) {
-                            const float a = v[j], b = v[j + h];
-                            v[j] = a + b;
-                            v[j + h] = a - b;
-                        }
-                    }
-                }
-                for (int i = 0; i < B; ++i) x[(blk * B + i) * out + c] = v[i] * inv;
+                ggml_trellis_had128(v, B);
+                for (int i = 0; i < B; ++i) x[(blk * B + i) * out + c] = v[i];
             }
         }
     }

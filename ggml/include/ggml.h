@@ -529,6 +529,7 @@ extern "C" {
 
         GGML_OP_MUL_MAT,
         GGML_OP_MUL_MAT_ID,
+        GGML_OP_TRELLIS_MM_ID,
         GGML_OP_OUT_PROD,
 
         GGML_OP_SCALE,
@@ -1460,6 +1461,21 @@ extern "C" {
     GGML_API struct ggml_tensor * ggml_mul_mat_id(
             struct ggml_context * ctx,
             struct ggml_tensor  * as,
+            struct ggml_tensor  * b,
+            struct ggml_tensor  * ids);
+
+    // indirect matrix multiplication with Escha trellis decoding
+    // code:  [16*K, tj, ti, E] int16 packed trellis codes (ti = in/16, tj = out/16)
+    // rin:   [in, E] f16 per-input-channel scale
+    // rout:  [out, E] f16 per-output-channel scale
+    // b:     [out, n_tokens] f32 activations
+    // ids:   [n_expert_used, n_tokens] i32 selected experts
+    // result: [in, n_expert_used, n_tokens] f32
+    GGML_API struct ggml_tensor * ggml_trellis_mm_id(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * code,
+            struct ggml_tensor  * rin,
+            struct ggml_tensor  * rout,
             struct ggml_tensor  * b,
             struct ggml_tensor  * ids);
 

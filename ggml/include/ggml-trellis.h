@@ -38,6 +38,11 @@ GGML_API void ggml_trellis_reconstruct(
         const ggml_fp16_t * rin, const ggml_fp16_t * rout,
         int64_t in, int64_t out, int K, float * dst);
 
+// In-place blockwise-128 orthonormal Sylvester Hadamard over `n` contiguous
+// elements (n must be a multiple of 128). Used on the activation side of the
+// trellis matmul: xh = had128(x * rout), y = had128(y_pre) * rin.
+GGML_API void ggml_trellis_had128(float * x, int64_t n);
+
 #ifdef __cplusplus
 }
 #endif
