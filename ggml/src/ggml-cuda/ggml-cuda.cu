@@ -64,6 +64,7 @@
 #include "ggml-cuda/tri.cuh"
 #include "ggml-cuda/cumsum.cuh"
 #include "ggml-cuda/fill.cuh"
+#include "ggml-cuda/trellis.cuh"
 #include "ggml.h"
 
 #include <algorithm>
@@ -3324,6 +3325,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_MUL_MAT_ID:
             ggml_cuda_mul_mat_id(ctx, dst);
             break;
+        case GGML_OP_TRELLIS_MM_ID:
+            ggml_cuda_trellis_mm_id(ctx, dst);
+            break;
         case GGML_OP_OUT_PROD:
             ggml_cuda_out_prod(ctx, dst);
             break;
@@ -3697,6 +3701,16 @@ static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
                 GGML_LOG_DEBUG("%s: disabling " GGML_CUDA_NAME " graphs due to unsupported node type\n", GGML_BACKEND_GRAPH_LOG_NAME);
 #endif
             }
+        }
+
+        // [TAG_TRELLIS_MM_ID_CUDA_GRAPHS]
+        // trellis_mm_id gathers the unique selected experts via a D2H copy and
+        // stream sync, so it cannot participate in backend graph capture.
+        if (node->op == GGML_OP_TRELLIS_MM_ID) {
+            use_cuda_graph = false;
+#ifndef NDEBUG
+            GGML_LOG_DEBUG("%s: disabling " GGML_CUDA_NAME " graphs due to trellis_mm_id stream sync\n", GGML_BACKEND_GRAPH_LOG_NAME);
+#endif
         }
 
         if (!use_cuda_graph) {
@@ -5621,6 +5635,17 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                         return false;
                 }
             } break;
+        case GGML_OP_TRELLIS_MM_ID:
+            // I16 packed codes + F16 scales + F32 activations/ids; dst F32
+            if (op->src[0]->type != GGML_TYPE_I16 ||
+                op->src[1]->type != GGML_TYPE_F16 ||
+                op->src[2]->type != GGML_TYPE_F16 ||
+                op->src[3]->type != GGML_TYPE_F32 ||
+                op->src[4]->type != GGML_TYPE_I32 ||
+                op->type != GGML_TYPE_F32) {
+                return false;
+            }
+            return true;
         case GGML_OP_OUT_PROD:
             return op->type == GGML_TYPE_F32 && op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32;
         case GGML_OP_GET_ROWS:
