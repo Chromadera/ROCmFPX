@@ -424,6 +424,13 @@ common_peg_parser analyze_tools::build_tool_parser_tag_tagged(parser_build_conte
             args_seq = args_seq + p.literal(arguments.end);
         }
 
+        // Tolerate a stray extra arg-close tag (BigBang-W2 2-bit quants emit
+        // "</parameter>" twice before "</function>"). The mapper's arg-close
+        // handler is a no-op when no quote is pending, so this is safe.
+        if (!arguments.value_suffix.empty() && arguments.value_suffix.front() == '<') {
+            args_seq = args_seq + p.optional(p.space() + p.tool_arg_close(p.literal(arguments.value_suffix)));
+        }
+
         // Build call_id parser based on position (if supported)
         common_peg_parser call_id_section = p.eps();
         bool have_call_id = false;
