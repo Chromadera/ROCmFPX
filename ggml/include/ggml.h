@@ -594,6 +594,8 @@ extern "C" {
         GGML_OP_DSV4_FP8_KV_QUANTIZE,
         GGML_OP_DSV4_ROPE_TAIL,
 
+        GGML_OP_ESCHA_MUL_MAT,
+
         GGML_OP_UNARY,
 
         GGML_OP_MAP_CUSTOM1,
@@ -1478,6 +1480,33 @@ extern "C" {
             struct ggml_tensor  * rout,
             struct ggml_tensor  * b,
             struct ggml_tensor  * ids);
+
+    // fused decode + matmul for a single Escha ESCHAM projection -- the dense sibling of
+    // ggml_trellis_mm_id. same codec, but there is no routing: every row of x goes
+    // through the one weight matrix, so there are no ids and no per-expert stride.
+    //
+    //   y = T128((T128(x * rin) @ decode(code))) * rout
+    //
+    // used by the dense escha checkpoints (Qwen3.8-27B-Escha-W2), where 400 projections
+    // -- attention, linear attention and MLP alike -- are stored as code rather than
+    // weights. the codebook is computed from the payload (QTIP trick), so lut is
+    // accepted but unused.
+    //
+    //   code : [16*K, OC/16, IC/16]     i16, K = 2 or 3
+    //   rin  : [IC]                     f16
+    //   rout : [OC]                     f16
+    //   lut  : [65536]                  f16  (unused, kept for format symmetry)
+    //   dep  : [16, 256]                i16  payload bit index per code bit
+    //   x    : [IC, n_tokens, n_batch]  f32
+    //   res  : [OC, n_tokens, n_batch]  f32
+    GGML_API struct ggml_tensor * ggml_escha_mul_mat(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * code,
+            struct ggml_tensor  * rin,
+            struct ggml_tensor  * rout,
+            struct ggml_tensor  * lut,
+            struct ggml_tensor  * dep,
+            struct ggml_tensor  * x);
 
     // A: m columns, n rows,
     // B: p columns, n rows,

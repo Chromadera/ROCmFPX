@@ -2387,6 +2387,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_dsv4_rope_tail(params, tensor);
             } break;
+        case GGML_OP_ESCHA_MUL_MAT:
+            {
+                ggml_compute_forward_escha_mul_mat(params, tensor);
+            } break;
         case GGML_OP_MAP_CUSTOM1:
             {
                 ggml_compute_forward_map_custom1(params, tensor);
@@ -2567,6 +2571,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_COUNT_EQUAL:
         case GGML_OP_SOLVE_TRI:
         case GGML_OP_GATED_DELTA_NET:
+        case GGML_OP_ESCHA_MUL_MAT:
         case GGML_OP_DSV4_HC_SPLIT_SINKHORN:
         case GGML_OP_DSV4_HC_WEIGHTED_SUM:
         case GGML_OP_DSV4_HC_EXPAND:
@@ -3298,6 +3303,13 @@ struct ggml_cplan ggml_graph_plan(
                         const int64_t K   = ggml_get_op_params_i32(node, 0);
                         const int64_t per_thread = S_v + (K > 1 ? S_v * S_v : 0);
                         cur = per_thread * sizeof(float) * n_tasks;
+                    } break;
+                case GGML_OP_ESCHA_MUL_MAT:
+                    {
+                        // rotated input, accumulator, and one decoded 16x16 tile
+                        const int64_t IC = node->src[0]->ne[2]*16;
+                        const int64_t OC = node->src[0]->ne[1]*16;
+                        cur = (IC + OC + 256) * sizeof(float) * n_tasks;
                     } break;
                 case GGML_OP_COUNT:
                     {
