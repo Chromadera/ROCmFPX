@@ -4736,6 +4736,14 @@ static void ggml_backend_cpu_repack_buffer_set_tensor(ggml_backend_buffer_t buff
     GGML_ASSERT(size == ggml_nbytes(tensor));
 
     auto tensor_traits = (ggml::cpu::repack::tensor_traits_base *) tensor->extra;
+    if (tensor_traits == nullptr) {
+        // Non-repackable type (e.g. the I16 escha dep/lut tables or F16 rin/rout) that landed
+        // in the repack buffer: the raw bytes ARE the final layout, so copy them verbatim.
+        GGML_ASSERT(tensor->data != nullptr);
+        memcpy(tensor->data, data, size);
+        return;
+    }
+
     auto OK            = tensor_traits->repack(tensor, data, size);
 
     GGML_ASSERT(OK == 0);

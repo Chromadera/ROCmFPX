@@ -1096,6 +1096,55 @@ static bool weight_buft_supported(const llama_hparams & hparams, ggml_tensor * w
                 ggml_tensor * b = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, n_embd_inp, w->ne[1], 1, 1);
                 op_tensor = ggml_im2col(ctx, w, b, 1, 0, 0, 0, 1, 0, false, GGML_TYPE_F16);
             } break;
+        case GGML_OP_ESCHA_MUL_MAT:
+            {
+                // Escha trellis codec matmul. `w` may be any one of the six operands
+                // (code/rin/rout/lut/dep). The test op must satisfy ggml_escha_mul_mat's
+                // shape/type asserts, which tie rin/rout/x sizes to code's IC/OC, so derive a
+                // consistent (IC, OC) pair from the operands that `w` actually is, then pad
+                // the rest to match.
+                int64_t IC = 128;
+                int64_t OC = 128;
+
+                if (w->type == GGML_TYPE_I16 && (w->ne[0] == 32 || w->ne[0] == 48) && w->ne[3] == 1) {
+                    IC = w->ne[2]*16;   // w is the code tensor
+                    OC = w->ne[1]*16;
+                } else if (w->type == GGML_TYPE_F16 && ggml_nelements(w) != 65536) {
+                    // w is a scale tensor: use its size for whichever axis it covers
+                    if (ggml_nelements(w) == IC || ggml_nelements(w) == OC) {
+                        // matches the default; ambiguous, leave the default pair
+                    }
+                }
+                if (IC % 128 != 0) { IC = (IC + 127)/128*128; }
+                if (OC % 128 != 0) { OC = (OC + 127)/128*128; }
+
+                ggml_tensor * code = ggml_new_tensor_3d(ctx, GGML_TYPE_I16, 32, OC/16, IC/16);
+                ggml_tensor * rin  = ggml_new_tensor_1d(ctx, GGML_TYPE_F16, IC);
+                ggml_tensor * rout = ggml_new_tensor_1d(ctx, GGML_TYPE_F16, OC);
+                ggml_tensor * lut  = ggml_new_tensor_1d(ctx, GGML_TYPE_F16, 65536);
+                ggml_tensor * dep  = ggml_new_tensor_2d(ctx, GGML_TYPE_I16, 16, 256);
+                ggml_tensor * x    = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, IC, 1);
+
+                // override the slot `w` actually occupies, keyed off its type/shape
+                if (w->type == GGML_TYPE_I16 && w->ne[0] == 16 && w->ne[1] == 256 && w->ne[2] == 1) {
+                    dep = w;
+                } else if (w->type == GGML_TYPE_F16 && ggml_nelements(w) == 65536) {
+                    lut = w;
+                } else if (w->type == GGML_TYPE_I16 && (w->ne[0] == 32 || w->ne[0] == 48) && w->ne[3] == 1) {
+                    code = w;
+                } else if (w->type == GGML_TYPE_F16 && ggml_nelements(w) == IC) {
+                    rin = w;
+                } else if (w->type == GGML_TYPE_F16 && ggml_nelements(w) == OC) {
+                    rout = w;
+                }
+
+                op_tensor = ggml_escha_mul_mat(ctx, code, rin, rout, lut, dep, x);
+                GGML_ASSERT(w->buffer == nullptr);
+                w->buffer = ggml_backend_buft_alloc_buffer(buft, 0);
+                bool _os = ggml_backend_dev_supports_op(dev, op_tensor);
+                ggml_backend_buffer_free(w->buffer);
+                w->buffer = nullptr;
+            } break;
         case GGML_OP_SCALE:
             {
                 op_tensor = ggml_scale(ctx, w, 1.0f);
@@ -1232,6 +1281,31 @@ struct ggml_tensor * llama_model_loader::create_tensor(
             }
         } else {
             op = info.op;
+            // Escha codec tensors (per-projection code/rin/rout triplets and the global
+            // lut/dep tables) must be selectable for a GPU device buffer so the escha mul_mat
+            // op can offload. They carry projection enums whose info.op is GGML_OP_MUL_MAT
+            // (which rejects the 3D I16 code for the GPU repack path), so route them through
+            // the escha op's own buft support instead -- but only when a GPU device buffer is
+            // actually in scope (ngl > 0); at ngl = 0 the escha tensors must stay on CPU.
+            if (tn.suffix != nullptr && strncmp(tn.suffix, "escha_", 6) == 0) {
+                bool gpu_in_scope = false;
+                auto has_gpu_buft = [](const buft_list_t * list) {
+                    if (list == nullptr) {
+                        return false;
+                    }
+                    for (const auto & cur : *list) {
+                        if (cur.second != ggml_backend_cpu_buffer_type()) {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+                gpu_in_scope = has_gpu_buft(buft_list_layer) || has_gpu_buft(buft_list_input)
+                            || has_gpu_buft(buft_list_output);
+                if (gpu_in_scope) {
+                    op = GGML_OP_ESCHA_MUL_MAT;
+                }
+            }
         }
 
         // sanity checks

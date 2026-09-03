@@ -65,6 +65,7 @@
 #include "ggml-cuda/cumsum.cuh"
 #include "ggml-cuda/fill.cuh"
 #include "ggml-cuda/trellis.cuh"
+#include "ggml-cuda/escha.cuh"
 #include "ggml.h"
 
 #include <algorithm>
@@ -3328,6 +3329,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_TRELLIS_MM_ID:
             ggml_cuda_trellis_mm_id(ctx, dst);
             break;
+        case GGML_OP_ESCHA_MUL_MAT:
+            ggml_cuda_escha_mul_mat(ctx, dst);
+            break;
         case GGML_OP_OUT_PROD:
             ggml_cuda_out_prod(ctx, dst);
             break;
@@ -5646,6 +5650,19 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 return false;
             }
             return true;
+        case GGML_OP_ESCHA_MUL_MAT: {
+            // dense escha: code I16, rin/rout/lut F16, dep I16, x F32; dst F32
+            if (op->src[0]->type != GGML_TYPE_I16 ||
+                op->src[1]->type != GGML_TYPE_F16 ||
+                op->src[2]->type != GGML_TYPE_F16 ||
+                op->src[3]->type != GGML_TYPE_F16 ||
+                op->src[4]->type != GGML_TYPE_I16 ||
+                op->src[5]->type != GGML_TYPE_F32 ||
+                op->type != GGML_TYPE_F32) {
+                return false;
+            }
+            return true;
+        }
         case GGML_OP_OUT_PROD:
             return op->type == GGML_TYPE_F32 && op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32;
         case GGML_OP_GET_ROWS:
@@ -6069,6 +6086,14 @@ static int64_t get_op_batch_size(const ggml_tensor * op) {
 
 static bool ggml_backend_cuda_device_offload_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
     ggml_backend_cuda_device_context * dev_ctx = (ggml_backend_cuda_device_context *) dev->context;
+
+    // The escha op needs its weight tensors in a device buffer (reached via the weight
+    // backend path, not the host-offload path). Never treat it as an offload candidate, so
+    // at -ngl 0 (weights on CPU) it stays on the CPU backend and only reaches HIP when the
+    // model loader actually placed code/rin/rout on a GPU device buffer.
+    if (op->op == GGML_OP_ESCHA_MUL_MAT) {
+        return false;
+    }
 
     return get_op_batch_size(op) >= dev_ctx->op_offload_min_batch_size;
 }
