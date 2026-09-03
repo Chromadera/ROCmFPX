@@ -16,7 +16,7 @@ targets via the same build script. RDNA2 (`gfx1030`) and RDNA4 (`gfx1200`) are
 | Item | What | Notes |
 |---|---|---|
 | **Model GGUF** | `Escha-Qwen3.8-27B-W2-Q8E.gguf` (10.3 GB) | the escha 2-bit DENSE build (Q8_0 head / Q8_0 KV) |
-| **The fork** | `https://github.com/chromadera/ROCmFPX` @ branch `escha-dense-27b` | this tree; carries the escha HIP kernel + trellis decode |
+| **The fork** | `https://github.com/Chromadera/ROCmFPX` @ branch `escha-dense-27b` | this tree; carries the escha HIP kernel + trellis decode |
 | **ROCm toolchain** | ROCm 7.x (clang/hipcc + HIP libraries) | needs `hipcc`, `clang++`, `rocm-smi` |
 | **GPU** | AMD Radeon `gfx1100`-class | 24+ GB VRAM recommended for full context |
 
@@ -45,7 +45,7 @@ If the GGUF is not published yet, convert it following the upstream
 From the repo root:
 
 ```bash
-git clone https://github.com/chromadera/ROCmFPX
+git clone https://github.com/Chromadera/ROCmFPX
 cd ROCmFPX
 git checkout escha-dense-27b
 ```
@@ -182,8 +182,8 @@ This port builds on prior OSS work. Please credit:
   `https://huggingface.co/aj9o9/Qwen3.8-27B-Escha-W2-GGUF`.
 - **charlie12345** — original ROCmFPX fork this port was based on
   (`https://github.com/charlie12345/ROCmFPX`); the escha port lives in this tree,
-  currently maintained under `chromadera` at
-  `https://github.com/chromadera/ROCmFPX`.
+  currently maintained under `Chromadera` at
+  `https://github.com/Chromadera/ROCmFPX`.
 - **Tom Turney / `PlunderStruck` / Aydan S.** — the `turbo3`/`turbo4` TurboQuant
   K/V-cache types, a **fork-level feature** that also works with this model.
   Not used in the measurements here (which ran `q8_0 / q8_0`), but credited for
