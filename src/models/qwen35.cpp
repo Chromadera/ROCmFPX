@@ -43,6 +43,16 @@ void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
                             (ml.get_weight("blk.0.attn_norm.weight") == nullptr);
     const int trunk_flags = mtp_only ? TENSOR_NOT_REQUIRED : 0;
 
+    // Dense Escha checkpoints (Qwen3.8-27B-Escha-W2): every projection is stored as a
+    // code triplet (escha_code/escha_rin/escha_rout) plus a plain F32 bias; the plain
+    // .weight projection tensors do not exist.
+    const bool has_escha = ml.get_tensor_meta(tn(LLM_TENSOR_FFN_GATE, "escha_code", 0).str().c_str()) != nullptr;
+    if (has_escha) {
+        escha_lut    = create_tensor(tn(LLM_TENSOR_ESCHA_LUT,    nullptr), { 65536 },   0);
+        escha_dep_k2 = create_tensor(tn(LLM_TENSOR_ESCHA_DEP_K2, nullptr), { 16, 256 }, 0);
+        escha_dep_k3 = create_tensor(tn(LLM_TENSOR_ESCHA_DEP_K3, nullptr), { 16, 256 }, 0);
+    }
+
     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, 0);
 
     // output
@@ -66,13 +76,18 @@ void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
         const int64_t value_dim  = head_v_dim * n_v_heads;
         const int64_t conv_dim   = key_dim * 2 + value_dim;
 
+        // In escha GGUFs the plain projection .weight tensors are absent (replaced by
+        // code triplets), so they become optional there.
+        const int proj_flags = has_escha ? (flags | TENSOR_NOT_REQUIRED) : flags;
+
         layer.attn_norm      = create_tensor(tn(LLM_TENSOR_ATTN_NORM,      "weight", il), { n_embd }, flags);
         layer.attn_post_norm = create_tensor(tn(LLM_TENSOR_ATTN_POST_NORM, "weight", il), { n_embd }, flags);
 
         if (!hparams.is_recurrent(il)) {
             // Attention layers
-            create_tensor_qkv(layer, il, n_embd, n_embd_head_k * n_head * 2, n_embd_k_gqa, n_embd_v_gqa, flags);
-            layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", il), { n_embd_head_k * n_head, n_embd }, flags);
+            create_tensor_qkv(layer, il, n_embd, n_embd_head_k * n_head * 2, n_embd_k_gqa, n_embd_v_gqa, proj_flags);
+            layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", il), { n_embd_head_k * n_head, n_embd }, proj_flags);
+            layer.wo_b = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "bias", il), { n_embd }, TENSOR_NOT_REQUIRED);
 
             // Q/K normalization for attention layers
             layer.attn_q_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_NORM, "weight", il), { n_embd_head_k }, flags);
@@ -81,19 +96,64 @@ void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
             // Linear attention (gated delta net) specific tensors
             // Create tensors with calculated dimensions
             layer.wqkv           = create_tensor(tn(LLM_TENSOR_ATTN_QKV,       "weight", il), { n_embd, key_dim * 2 + value_dim }, TENSOR_NOT_REQUIRED);
+            layer.wqkv_b         = create_tensor(tn(LLM_TENSOR_ATTN_QKV,       "bias",   il), { key_dim * 2 + value_dim }, TENSOR_NOT_REQUIRED);
             layer.wqkv_gate      = create_tensor(tn(LLM_TENSOR_ATTN_GATE,      "weight", il), { n_embd, value_dim }, TENSOR_NOT_REQUIRED);
+            layer.wqkv_gate_b    = create_tensor(tn(LLM_TENSOR_ATTN_GATE,      "bias",   il), { value_dim }, TENSOR_NOT_REQUIRED);
             layer.ssm_conv1d     = create_tensor(tn(LLM_TENSOR_SSM_CONV1D,     "weight", il), { hparams.ssm_d_conv, conv_dim }, flags);
             layer.ssm_dt         = create_tensor(tn(LLM_TENSOR_SSM_DT,         "bias",   il), { hparams.ssm_dt_rank }, flags);
             layer.ssm_a          = create_tensor(tn(LLM_TENSOR_SSM_A_NOSCAN,             il), { hparams.ssm_dt_rank }, flags);
             layer.ssm_beta       = create_tensor(tn(LLM_TENSOR_SSM_BETA,       "weight", il), { n_embd, n_v_heads }, flags);
             layer.ssm_alpha      = create_tensor(tn(LLM_TENSOR_SSM_ALPHA,      "weight", il), { n_embd, n_v_heads }, flags);
             layer.ssm_norm       = create_tensor(tn(LLM_TENSOR_SSM_NORM,       "weight", il), { head_v_dim }, flags);
-            layer.ssm_out        = create_tensor(tn(LLM_TENSOR_SSM_OUT,        "weight", il), { value_dim, n_embd }, flags);
+            layer.ssm_out        = create_tensor(tn(LLM_TENSOR_SSM_OUT,        "weight", il), { value_dim, n_embd }, proj_flags);
+            layer.ssm_out_b      = create_tensor(tn(LLM_TENSOR_SSM_OUT,        "bias",   il), { n_embd }, TENSOR_NOT_REQUIRED);
         }
 
-        layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", il), {n_embd,   n_ff}, flags);
-        layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", il), {  n_ff, n_embd}, flags);
-        layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", il), {n_embd,   n_ff}, flags);
+        layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", il), {n_embd,   n_ff}, proj_flags);
+        layer.ffn_gate_b = create_tensor(tn(LLM_TENSOR_FFN_GATE, "bias", il), { n_ff }, TENSOR_NOT_REQUIRED);
+        layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", il), {  n_ff, n_embd}, proj_flags);
+        layer.ffn_down_b = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "bias", il), { n_embd }, TENSOR_NOT_REQUIRED);
+        layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", il), {n_embd,   n_ff}, proj_flags);
+        layer.ffn_up_b   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "bias", il), { n_ff }, TENSOR_NOT_REQUIRED);
+
+        // Dense Escha code triplets (present only in escha GGUFs). K is fixed per
+        // projection in the checkpoint: ffn_up/ffn_down are K=3, everything else K=2.
+        // code: I16 [16*K, OC/16, IC/16], rin: F16 [IC], rout: F16 [OC].
+        if (has_escha) {
+            if (!hparams.is_recurrent(il)) {
+                layer.escha_wq.code   = create_tensor(tn(LLM_TENSOR_ATTN_Q,     "escha_code", il), { 32, (n_embd_head_k * n_head * 2) / 16, n_embd / 16 }, TENSOR_NOT_REQUIRED);
+                layer.escha_wq.rin    = create_tensor(tn(LLM_TENSOR_ATTN_Q,     "escha_rin",  il), { n_embd }, TENSOR_NOT_REQUIRED);
+                layer.escha_wq.rout   = create_tensor(tn(LLM_TENSOR_ATTN_Q,     "escha_rout", il), { n_embd_head_k * n_head * 2 }, TENSOR_NOT_REQUIRED);
+                layer.escha_wk.code   = create_tensor(tn(LLM_TENSOR_ATTN_K,     "escha_code", il), { 32, n_embd_k_gqa / 16, n_embd / 16 }, TENSOR_NOT_REQUIRED);
+                layer.escha_wk.rin    = create_tensor(tn(LLM_TENSOR_ATTN_K,     "escha_rin",  il), { n_embd }, TENSOR_NOT_REQUIRED);
+                layer.escha_wk.rout   = create_tensor(tn(LLM_TENSOR_ATTN_K,     "escha_rout", il), { n_embd_k_gqa }, TENSOR_NOT_REQUIRED);
+                layer.escha_wv.code   = create_tensor(tn(LLM_TENSOR_ATTN_V,     "escha_code", il), { 32, n_embd_v_gqa / 16, n_embd / 16 }, TENSOR_NOT_REQUIRED);
+                layer.escha_wv.rin    = create_tensor(tn(LLM_TENSOR_ATTN_V,     "escha_rin",  il), { n_embd }, TENSOR_NOT_REQUIRED);
+                layer.escha_wv.rout   = create_tensor(tn(LLM_TENSOR_ATTN_V,     "escha_rout", il), { n_embd_v_gqa }, TENSOR_NOT_REQUIRED);
+                layer.escha_wo.code   = create_tensor(tn(LLM_TENSOR_ATTN_OUT,   "escha_code", il), { 32, n_embd / 16, (n_embd_head_k * n_head) / 16 }, TENSOR_NOT_REQUIRED);
+                layer.escha_wo.rin    = create_tensor(tn(LLM_TENSOR_ATTN_OUT,   "escha_rin",  il), { n_embd_head_k * n_head }, TENSOR_NOT_REQUIRED);
+                layer.escha_wo.rout   = create_tensor(tn(LLM_TENSOR_ATTN_OUT,   "escha_rout", il), { n_embd }, TENSOR_NOT_REQUIRED);
+            } else {
+                layer.escha_wqkv.code     = create_tensor(tn(LLM_TENSOR_ATTN_QKV,   "escha_code", il), { 32, (key_dim * 2 + value_dim) / 16, n_embd / 16 }, TENSOR_NOT_REQUIRED);
+                layer.escha_wqkv.rin      = create_tensor(tn(LLM_TENSOR_ATTN_QKV,   "escha_rin",  il), { n_embd }, TENSOR_NOT_REQUIRED);
+                layer.escha_wqkv.rout     = create_tensor(tn(LLM_TENSOR_ATTN_QKV,   "escha_rout", il), { key_dim * 2 + value_dim }, TENSOR_NOT_REQUIRED);
+                layer.escha_wqkv_gate.code = create_tensor(tn(LLM_TENSOR_ATTN_GATE, "escha_code", il), { 32, value_dim / 16, n_embd / 16 }, TENSOR_NOT_REQUIRED);
+                layer.escha_wqkv_gate.rin  = create_tensor(tn(LLM_TENSOR_ATTN_GATE, "escha_rin",  il), { n_embd }, TENSOR_NOT_REQUIRED);
+                layer.escha_wqkv_gate.rout = create_tensor(tn(LLM_TENSOR_ATTN_GATE, "escha_rout", il), { value_dim }, TENSOR_NOT_REQUIRED);
+                layer.escha_ssm_out.code  = create_tensor(tn(LLM_TENSOR_SSM_OUT,    "escha_code", il), { 32, n_embd / 16, value_dim / 16 }, TENSOR_NOT_REQUIRED);
+                layer.escha_ssm_out.rin   = create_tensor(tn(LLM_TENSOR_SSM_OUT,    "escha_rin",  il), { value_dim }, TENSOR_NOT_REQUIRED);
+                layer.escha_ssm_out.rout  = create_tensor(tn(LLM_TENSOR_SSM_OUT,    "escha_rout", il), { n_embd }, TENSOR_NOT_REQUIRED);
+            }
+            layer.escha_ffn_up.code   = create_tensor(tn(LLM_TENSOR_FFN_UP,     "escha_code", il), { 48, n_ff / 16, n_embd / 16 }, TENSOR_NOT_REQUIRED);
+            layer.escha_ffn_up.rin    = create_tensor(tn(LLM_TENSOR_FFN_UP,     "escha_rin",  il), { n_embd }, TENSOR_NOT_REQUIRED);
+            layer.escha_ffn_up.rout   = create_tensor(tn(LLM_TENSOR_FFN_UP,     "escha_rout", il), { n_ff }, TENSOR_NOT_REQUIRED);
+            layer.escha_ffn_gate.code = create_tensor(tn(LLM_TENSOR_FFN_GATE,   "escha_code", il), { 32, n_ff / 16, n_embd / 16 }, TENSOR_NOT_REQUIRED);
+            layer.escha_ffn_gate.rin  = create_tensor(tn(LLM_TENSOR_FFN_GATE,   "escha_rin",  il), { n_embd }, TENSOR_NOT_REQUIRED);
+            layer.escha_ffn_gate.rout = create_tensor(tn(LLM_TENSOR_FFN_GATE,   "escha_rout", il), { n_ff }, TENSOR_NOT_REQUIRED);
+            layer.escha_ffn_down.code = create_tensor(tn(LLM_TENSOR_FFN_DOWN,   "escha_code", il), { 48, n_embd / 16, n_ff / 16 }, TENSOR_NOT_REQUIRED);
+            layer.escha_ffn_down.rin  = create_tensor(tn(LLM_TENSOR_FFN_DOWN,   "escha_rin",  il), { n_ff }, TENSOR_NOT_REQUIRED);
+            layer.escha_ffn_down.rout = create_tensor(tn(LLM_TENSOR_FFN_DOWN,   "escha_rout", il), { n_embd }, TENSOR_NOT_REQUIRED);
+        }
     };
 
     auto load_block_mtp = [&](int il) {
@@ -238,14 +298,43 @@ std::pair<ggml_tensor *, ggml_tensor *> llama_model_qwen35::graph::build_qkvz(
     const int64_t n_seqs       = ubatch.n_seqs;
     const int64_t n_seq_tokens = ubatch.n_seq_tokens;
 
-    ggml_tensor * qkv_mixed = build_lora_mm(model.layers[il].wqkv, input, model.layers[il].wqkv_s);
+    ggml_tensor * qkv_mixed = model.layers[il].escha_wqkv.code
+            ? build_escha_mm(input, model.layers[il].escha_wqkv, model.layers[il].wqkv_b, "linear_attn_qkv_mixed", il)
+            : build_lora_mm(model.layers[il].wqkv, input, model.layers[il].wqkv_s);
     qkv_mixed = ggml_reshape_3d(ctx0, qkv_mixed, qkv_mixed->ne[0], n_seq_tokens, n_seqs);
     cb(qkv_mixed, "linear_attn_qkv_mixed", il);
 
-    ggml_tensor * z = build_lora_mm(model.layers[il].wqkv_gate, input, model.layers[il].wqkv_gate_s);
+    ggml_tensor * z = model.layers[il].escha_wqkv_gate.code
+            ? build_escha_mm(input, model.layers[il].escha_wqkv_gate, model.layers[il].wqkv_gate_b, "z", il)
+            : build_lora_mm(model.layers[il].wqkv_gate, input, model.layers[il].wqkv_gate_s);
     cb(z, "z", il);
 
     return { qkv_mixed, z };
+}
+
+ggml_tensor * llama_model_qwen35::graph::build_escha_mm(
+                 ggml_tensor * x,
+         const llama_layer_escha & es,
+                 ggml_tensor * b,
+                const char * name,
+                        int   il) {
+    GGML_ASSERT(es.code && es.rin && es.rout && "escha projection is missing its code triplet");
+    GGML_ASSERT(model.escha_lut && "escha checkpoint is missing escha_lut");
+
+    // K is fixed per projection in the checkpoint: code ne[0] = 16*K
+    ggml_tensor * dep = es.code->ne[0] == 32 ? model.escha_dep_k2 : model.escha_dep_k3;
+    GGML_ASSERT(dep && "escha checkpoint is missing the dep table for this K");
+
+    GGML_ASSERT(x->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_contiguous_rows(x));
+
+    ggml_tensor * y = ggml_escha_mul_mat(ctx0, es.code, es.rin, es.rout, model.escha_lut, dep, x);
+    if (b) {
+        y = ggml_add(ctx0, y, b);
+    }
+    cb(y, name, il);
+
+    return y;
 }
 
 ggml_tensor * llama_model_qwen35::graph::build_norm_gated(
@@ -271,7 +360,9 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn(
     // Order: joint QG projection, QG split, Q norm, KV projection, K norm, RoPE, attention
 
     // Qwen3Next uses a single Q projection that outputs query + gate
-    ggml_tensor * Qcur_full = build_lora_mm(model.layers[il].wq, cur, model.layers[il].wq_s); // [ (n_embd_head * 2) * n_head, n_tokens ]
+    ggml_tensor * Qcur_full = model.layers[il].escha_wq.code
+            ? build_escha_mm(cur, model.layers[il].escha_wq, model.layers[il].wq_b, "Qcur_full", il)
+            : build_lora_mm(model.layers[il].wq, cur, model.layers[il].wq_s); // [ (n_embd_head * 2) * n_head, n_tokens ]
     cb(Qcur_full, "Qcur_full", il);
 
     ggml_tensor * Qcur = ggml_view_3d(ctx0, Qcur_full, n_embd_head, n_head, n_tokens,
@@ -283,10 +374,14 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn(
     Qcur = build_norm(Qcur, model.layers[il].attn_q_norm, nullptr, LLM_NORM_RMS, il);
     cb(Qcur, "Qcur_normed", il);
 
-    ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, cur, model.layers[il].wk_s);
+    ggml_tensor * Kcur = model.layers[il].escha_wk.code
+            ? build_escha_mm(cur, model.layers[il].escha_wk, model.layers[il].wk_b, "Kcur", il)
+            : build_lora_mm(model.layers[il].wk, cur, model.layers[il].wk_s);
     cb(Kcur, "Kcur", il);
 
-    ggml_tensor * Vcur = build_lora_mm(model.layers[il].wv, cur, model.layers[il].wv_s);
+    ggml_tensor * Vcur = model.layers[il].escha_wv.code
+            ? build_escha_mm(cur, model.layers[il].escha_wv, model.layers[il].wv_b, "Vcur", il)
+            : build_lora_mm(model.layers[il].wv, cur, model.layers[il].wv_s);
     cb(Vcur, "Vcur", il);
 
     // Apply K normalization
@@ -334,7 +429,9 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn(
     cur = ggml_mul(ctx0, cur, gate_sigmoid);
     cb(cur, "attn_gated", il);
 
-    cur = build_lora_mm(model.layers[il].wo, cur, model.layers[il].wo_s);
+    cur = model.layers[il].escha_wo.code
+            ? build_escha_mm(cur, model.layers[il].escha_wo, model.layers[il].wo_b, "attn_output", il)
+            : build_lora_mm(model.layers[il].wo, cur, model.layers[il].wo_s);
     cb(cur, "attn_output", il);
 
     return cur;
@@ -465,7 +562,9 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn_linear(
     cb(final_output, "final_output", il);
 
     // Output projection
-    cur = build_lora_mm(model.layers[il].ssm_out, final_output, model.layers[il].ssm_out_s);
+    cur = model.layers[il].escha_ssm_out.code
+            ? build_escha_mm(final_output, model.layers[il].escha_ssm_out, model.layers[il].ssm_out_b, "linear_attn_out", il)
+            : build_lora_mm(model.layers[il].ssm_out, final_output, model.layers[il].ssm_out_s);
     cb(cur, "linear_attn_out", il);
 
     // Reshape back to original dimensions
@@ -478,12 +577,24 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_ffn(ggml_tensor * cur, cons
     // Qwen3.5 does not use MoE FFN
     GGML_ASSERT(model.layers[il].ffn_gate_inp == nullptr);
 
-    cur = build_ffn(cur,
-        model.layers[il].ffn_up, NULL, model.layers[il].ffn_up_s,
-        model.layers[il].ffn_gate, NULL, model.layers[il].ffn_gate_s,
-        model.layers[il].ffn_down, NULL, model.layers[il].ffn_down_s,
-        NULL,
-        LLM_FFN_SILU, LLM_FFN_PAR, il);
+    const auto & layer = model.layers[il];
+
+    if (layer.escha_ffn_up.code) {
+        // Dense Escha path: fused decode + matmul for gate/up/down with the same
+        // gating as build_ffn (LLM_FFN_SILU + LLM_FFN_PAR).
+        ggml_tensor * up_out   = build_escha_mm(cur, layer.escha_ffn_up,   layer.ffn_up_b,   "ffn_up",   il);
+        ggml_tensor * gate_out = build_escha_mm(cur, layer.escha_ffn_gate, layer.ffn_gate_b, "ffn_gate", il);
+        cur = ggml_swiglu_split(ctx0, gate_out, up_out);
+        cb(cur, "ffn_swiglu", il);
+        cur = build_escha_mm(cur, layer.escha_ffn_down, layer.ffn_down_b, "ffn_down", il);
+    } else {
+        cur = build_ffn(cur,
+            model.layers[il].ffn_up, NULL, model.layers[il].ffn_up_s,
+            model.layers[il].ffn_gate, NULL, model.layers[il].ffn_gate_s,
+            model.layers[il].ffn_down, NULL, model.layers[il].ffn_down_s,
+            NULL,
+            LLM_FFN_SILU, LLM_FFN_PAR, il);
+    }
     cb(cur, "ffn_out", il);
 
     return cur;

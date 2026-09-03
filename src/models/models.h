@@ -1919,6 +1919,15 @@ struct llama_model_qwen35 : public llama_model_base {
                     ggml_tensor * input,
                             int   il);
 
+        // Dense Escha projection (Qwen3.8-27B-Escha-W2): fused decode + matmul
+        // replacing the plain matmul when the layer holds the code triplet.
+        ggml_tensor * build_escha_mm(
+                    ggml_tensor * x,
+             const llama_layer_escha & es,
+                    ggml_tensor * b,
+                           const char * name,
+                                int   il);
+
         const llama_model & model;
     };
 

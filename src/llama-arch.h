@@ -618,6 +618,9 @@ enum llm_tensor {
     LLM_TENSOR_MASKED_EMBD_ORDERING,
     LLM_TENSOR_FC,
     LLM_TENSOR_D2T,
+    LLM_TENSOR_ESCHA_LUT,
+    LLM_TENSOR_ESCHA_DEP_K2,
+    LLM_TENSOR_ESCHA_DEP_K3,
 };
 
 enum llm_tensor_layer {

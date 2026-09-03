@@ -220,6 +220,18 @@ struct llama_layer_nextn {
     struct ggml_tensor * hc_head_scale         = nullptr;
 };
 
+// Escha dense codec triplet: one projection stored as 2-bit trellis codes instead of
+// plain weights (Qwen3.8-27B-Escha-W2 dense GGUF). Decoded on the fly by
+// ggml_escha_mul_mat. All three null means the projection is a plain weight.
+//   code : I16 [16*K, OC/16, IC/16]  K = 2 or 3
+//   rin  : F16 [IC]  per-input-channel  scale
+//   rout : F16 [OC]  per-output-channel scale
+struct llama_layer_escha {
+    struct ggml_tensor * code = nullptr;
+    struct ggml_tensor * rin  = nullptr;
+    struct ggml_tensor * rout = nullptr;
+};
+
 struct llama_layer {
     // normalization
     struct ggml_tensor * attn_norm       = nullptr;
@@ -267,6 +279,7 @@ struct llama_layer {
     struct ggml_tensor * wv_enc    = nullptr;
     struct ggml_tensor * wo_enc    = nullptr;
     struct ggml_tensor * wqkv_gate = nullptr;
+    struct ggml_tensor * wqkv_gate_b = nullptr;
     struct ggml_tensor * attn_kv   = nullptr;
     struct ggml_tensor * attn_wo_a = nullptr;
     struct ggml_tensor * attn_wo_b = nullptr;
@@ -334,6 +347,19 @@ struct llama_layer {
     struct ggml_tensor * ffn_down_exps_escha_rin   = nullptr;
     struct ggml_tensor * ffn_down_exps_escha_rout  = nullptr;
 
+    // Escha dense codec triplets (Qwen3.8-27B-Escha-W2 dense GGUF): every projection
+    // is a code triplet and the plain .weight tensors are absent. All-null = plain GGUF.
+    struct llama_layer_escha escha_wq        = {};
+    struct llama_layer_escha escha_wk        = {};
+    struct llama_layer_escha escha_wv        = {};
+    struct llama_layer_escha escha_wo        = {};
+    struct llama_layer_escha escha_wqkv      = {};
+    struct llama_layer_escha escha_wqkv_gate = {};
+    struct llama_layer_escha escha_ssm_out   = {};
+    struct llama_layer_escha escha_ffn_up    = {};
+    struct llama_layer_escha escha_ffn_gate  = {};
+    struct llama_layer_escha escha_ffn_down  = {};
+
     // ff MoE latent proj
     struct ggml_tensor * ffn_latent_down = nullptr;
     struct ggml_tensor * ffn_latent_up   = nullptr;
@@ -362,6 +388,7 @@ struct llama_layer {
     struct ggml_tensor * ssm_x   = nullptr;
     struct ggml_tensor * ssm_dt  = nullptr;
     struct ggml_tensor * ssm_out = nullptr;
+    struct ggml_tensor * ssm_out_b = nullptr;
 
     // mamba
     struct ggml_tensor * ssm_conv1d = nullptr;
@@ -584,6 +611,14 @@ struct llama_model {
     struct ggml_tensor * output_hc_fn    = nullptr;
     struct ggml_tensor * output_hc_scale = nullptr;
     struct ggml_tensor * output_norm_enc = nullptr;
+
+    // Dense Escha checkpoints (Qwen3.8-27B-Escha-W2): global codec tensors for
+    // ggml_escha_mul_mat. lut is accepted by the op but unused (the codebook is
+    // computed from the payload); the dep table is selected by K (2 or 3).
+    struct ggml_tensor * escha_lut    = nullptr; // F16 [65536]
+    struct ggml_tensor * escha_dep_k2 = nullptr; // I16 [16, 256]
+    struct ggml_tensor * escha_dep_k3 = nullptr; // I16 [16, 256]
+
     struct ggml_tensor * nextn_proj_pre  = nullptr;
     struct ggml_tensor * nextn_proj_post = nullptr;
 

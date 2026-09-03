@@ -608,6 +608,9 @@ static const std::map<llm_tensor, const char *> LLM_TENSOR_NAMES = {
     { LLM_TENSOR_MASKED_EMBD_ORDERING,                   "masked_embd_ordering" },
     { LLM_TENSOR_FC,                                     "fc" },
     { LLM_TENSOR_D2T,                                    "d2t" },
+    { LLM_TENSOR_ESCHA_LUT,                              "escha_lut" },
+    { LLM_TENSOR_ESCHA_DEP_K2,                           "escha_dep_k2" },
+    { LLM_TENSOR_ESCHA_DEP_K3,                           "escha_dep_k3" },
 };
 
 // declare information about the model weight tensors:
@@ -868,6 +871,11 @@ static const std::map<llm_tensor, llm_tensor_info> LLM_TENSOR_INFOS = {
     // eagle3
     {LLM_TENSOR_FC,                         {LLM_TENSOR_LAYER_OUTPUT,    GGML_OP_MUL_MAT}},
     {LLM_TENSOR_D2T,                        {LLM_TENSOR_LAYER_OUTPUT,    GGML_OP_GET_ROWS}},
+
+    // dense Escha codec globals (Qwen3.8-27B-Escha-W2): lut is unused by the op but must be present
+    {LLM_TENSOR_ESCHA_LUT,                   {LLM_TENSOR_LAYER_INPUT,     GGML_OP_ESCHA_MUL_MAT}},
+    {LLM_TENSOR_ESCHA_DEP_K2,                 {LLM_TENSOR_LAYER_INPUT,    GGML_OP_ESCHA_MUL_MAT}},
+    {LLM_TENSOR_ESCHA_DEP_K3,                 {LLM_TENSOR_LAYER_INPUT,    GGML_OP_ESCHA_MUL_MAT}},
 };
 
 LLM_KV::LLM_KV(llm_arch arch, const char * suffix) : arch(arch), suffix(suffix) {}
