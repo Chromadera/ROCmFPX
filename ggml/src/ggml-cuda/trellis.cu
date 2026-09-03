@@ -2,7 +2,7 @@
 
 // Escha trellis expert matmul on HIP/CUDA, mirroring the verified CPU compute
 // (ggml_compute_forward_trellis_mm_id in ggml-cpu.c) and the EXL3/eschamoe
-// reference (bigbang-w2/eval/escha-evidence/escha_ref.py).
+// reference (from the upstream Escha runtime).
 //
 //   code:  [16*K, tj, ti, E] int16   ti = in/16, tj = out/16, K = bits per code
 //   rin:   [in, E]  f16  per-input-channel  scale

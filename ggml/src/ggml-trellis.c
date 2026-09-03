@@ -1,8 +1,8 @@
 //
 // ggml-trellis: decode-side implementation (see ggml-trellis.h).
 //
-// Faithful C port of the validated NumPy reference
-// (bigbang-w2/eval/escha-evidence/escha_ref.py):
+// Faithful C port of the validated Escha NumPy reference
+// (escha_ref.unpack_trellis, from the upstream Escha runtime / Ajay9o9):
 //   - unpack_trellis   (tail-biting circular 16-bit windows)
 //   - decode_3inst     (MCG multiply + mask/xor into two fp16 lanes, summed)
 //   - tensor_core_perm (16x16 tile scatter)

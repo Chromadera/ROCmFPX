@@ -2,8 +2,8 @@
 //
 // ggml-trellis: Escha-class trellis codec support for the ROCmFPX fork.
 //
-// Implements the decode side of the EXL3/eschamoe format (see
-// bigbang-w2/eval/escha-evidence/escha_ref.py for the validated reference):
+// Implements the decode side of the EXL3/eschamoe format (see the upstream
+// Escha runtime reference, escha_ref.unpack_trellis):
 //   escha_code  I16 [in/16, out/16, 16*K]   packed tail-biting trellis codes
 //   escha_rin   F16 [in]                    per-input-channel scale
 //   escha_rout  F16 [out]                   per-output-channel scale
@@ -17,8 +17,7 @@
 // reference (bit-exact).
 //
 // Encode is intentionally NOT here: the trellis Viterbi search runs offline
-// (bigbang-w2/eval/trellis_encoder.py, validated on the Shannon bound), the
-// same split Escha themselves use (offline quantizer, runtime decoder).
+// (the same split Escha themselves use — offline quantizer, runtime decoder).
 
 #include "ggml.h"
 
